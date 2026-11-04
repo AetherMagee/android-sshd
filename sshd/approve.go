@@ -152,7 +152,9 @@ func appPrompt(ctx context.Context, title, text string, window bool) (time.Durat
 func broadcast(ctx context.Context, action, id string, extras ...string) error {
 	args := append([]string{"broadcast", "--user", "0", "-f", includeStop,
 		"-n", appPkg + "/.PromptReceiver", "-a", appPkg + "." + action, "--es", "id", id}, extras...)
-	out, err := exec.CommandContext(ctx, "am", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "am", args...)
+	cmd.WaitDelay = 2 * time.Second // am forks `cmd`, which would keep the pipe open past a kill
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("am broadcast %s: %v: %s", action, err, strings.TrimSpace(string(out)))
 	}

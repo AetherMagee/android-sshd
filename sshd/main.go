@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,12 +38,12 @@ type server struct {
 	preAuth     chan struct{} // bounds connections that haven't authenticated yet
 	baseEnv     []string      // environment for sessions, before per-session variables
 
-	ctx   context.Context // cancelled on shutdown: ends every session
-	procs sync.WaitGroup  // running session processes
+	stopping context.Context // cancelled on shutdown: ends every session
+	procs    atomic.Int64    // running session processes
 
-	mu    sync.Mutex
-	perIP map[string]int // connections per source IP that haven't authenticated yet
-	quiet logLimiter     // for log lines that unauthenticated peers can trigger
+	admitMu sync.Mutex
+	perIP   map[string]int // connections per source IP that haven't authenticated yet
+	quiet   logLimiter     // for log lines that unauthenticated peers can trigger
 }
 
 const (
@@ -104,20 +105,20 @@ func main() {
 		log.Fatal(err)
 	}
 	var stop context.CancelFunc
-	s.ctx, stop = signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	s.stopping, stop = signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	context.AfterFunc(s.ctx, func() { ln.Close() })
+	context.AfterFunc(s.stopping, func() { ln.Close() })
+	// Handling SIGHUP (by ignoring it) instead of inheriting an ignore (nohup)
+	// gives sessions the default action, so hanging them up works.
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGHUP)
 	log.Printf("listening on %s (tailnet-only=%v), host key %s", ln.Addr(), s.tailnetOnly, ssh.FingerprintSHA256(hostKey.PublicKey()))
 	s.serve(ln)
 
 	// Sessions run in their own process groups and would outlive us (and their
 	// max-age): give the hangups (SIGHUP, then SIGKILL after 2s) time to land.
 	log.Print("stopping, ending sessions")
-	done := make(chan struct{})
-	go func() { s.procs.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
+	for deadline := time.Now().Add(3 * time.Second); s.procs.Load() > 0 && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -177,8 +178,8 @@ func (s *server) admit(ip string) (release func(), ok bool) {
 	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() {
 		ip = netip.PrefixFrom(a, 64).Masked().String()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.admitMu.Lock()
+	defer s.admitMu.Unlock()
 	if s.perIP == nil {
 		s.perIP = map[string]int{}
 	}
@@ -194,8 +195,8 @@ func (s *server) admit(ip string) (release func(), ok bool) {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
+			s.admitMu.Lock()
+			defer s.admitMu.Unlock()
 			if s.perIP[ip]--; s.perIP[ip] == 0 {
 				delete(s.perIP, ip)
 			}
@@ -207,6 +208,10 @@ func (s *server) admit(ip string) (release func(), ok bool) {
 func (s *server) handle(c net.Conn) {
 	defer c.Close()
 	ip, _, _ := net.SplitHostPort(c.RemoteAddr().String())
+	if a, err := netip.ParseAddr(ip); err == nil && s.tailnetOnly && !isTailnet(a.Unmap()) {
+		s.quiet.printf("%s: rejected: not a tailnet address", ip)
+		return // cheap check first, so strangers can't take handshake slots
+	}
 	release, ok := s.admit(ip)
 	if !ok {
 		s.quiet.printf("%s: rejected: too many connections authenticating", ip)

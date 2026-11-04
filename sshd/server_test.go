@@ -69,7 +69,7 @@ func newEnv(t *testing.T) *env {
 		baseEnv:  os.Environ(),
 	}
 	var shutdown context.CancelFunc
-	s.ctx, shutdown = context.WithCancel(context.Background())
+	s.stopping, shutdown = context.WithCancel(context.Background())
 	t.Cleanup(shutdown)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -461,11 +461,41 @@ func TestShutdownEndsSessions(t *testing.T) {
 		t.Fatal("session didn't start")
 	}
 	e.shutdown()
-	done := make(chan struct{})
-	go func() { e.srv.procs.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("process %d still running after shutdown", pid)
+	for deadline := time.Now().Add(3 * time.Second); e.srv.procs.Load() > 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d still running after shutdown", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A slow reader must still get all output, with the right exit status, even
+// when the command exits long before the output is read.
+func TestExecSlowReaderGetsAllOutput(t *testing.T) {
+	e := newEnv(t)
+	c, err := e.dial(e.key(`approve="never"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	s, _ := c.NewSession()
+	out, _ := s.StdoutPipe()
+	s.Start("head -c 2097152 /dev/zero; sleep .3; printf x; sleep .3; head -c 4000 /dev/zero; exit 5")
+	time.Sleep(3 * time.Second) // the command is long done; its output sits in the pipe
+	n, _ := io.Copy(io.Discard, out)
+	err = s.Wait()
+	var ee *ssh.ExitError
+	if n != 2097152+1+4000 || !errors.As(err, &ee) || ee.ExitStatus() != 5 {
+		t.Fatalf("got %d bytes, %v; want %d bytes, exit 5", n, err, 2097152+1+4000)
+	}
+}
+
+// Background jobs holding stdout must not keep the session open.
+func TestExecBackgroundJobDoesNotHang(t *testing.T) {
+	e := newEnv(t)
+	start := time.Now()
+	out, err := e.run(e.key(`approve="never"`), "sleep 30 & echo done")
+	if err != nil || out != "done\n" || time.Since(start) > 5*time.Second {
+		t.Fatalf("got %q, %v after %s", out, err, time.Since(start))
 	}
 }

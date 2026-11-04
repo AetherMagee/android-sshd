@@ -65,12 +65,10 @@ type conn struct {
 const maxAgeWarning = time.Minute
 
 func (s *server) serveConn(sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, o *keyOpts, a acct) {
-	base := s.ctx
-	if base == nil {
-		base = context.Background()
-	}
-	ctx, cancel := context.WithCancel(base)
+	ctx, cancel := context.WithCancel(s.stopping)
 	defer cancel()
+	// On shutdown also close the connection, so no new sessions start.
+	defer context.AfterFunc(ctx, func() { sc.Close() })()
 	c := &conn{server: s, sc: sc, opts: o, acct: a, ctx: ctx, sessions: map[ssh.Channel]bool{}}
 
 	if o.maxAge > maxAgeWarning {
@@ -261,26 +259,47 @@ func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint
 		}()
 	} else {
 		cmd.SysProcAttr = attr
-		cmd.Stdout, cmd.Stderr = ch, ch.Stderr()
-		cmd.WaitDelay = time.Second // don't hang on background processes holding stdout
-		// Not cmd.Stdin = ch: Wait would block until the client closes stdin.
-		stdin, err := cmd.StdinPipe()
+		// Our own pipes rather than cmd.Stdout = ch: exec's copier would be cut off
+		// (dropping output) by WaitDelay, or hang without it on background jobs.
+		outR, outW, err := os.Pipe()
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := cmd.Start(); err != nil {
+		errR, errW, err := os.Pipe()
+		if err != nil {
+			outR.Close()
+			outW.Close()
+			return nil, nil, err
+		}
+		cmd.Stdout, cmd.Stderr = outW, errW
+		// Not cmd.Stdin = ch: Wait would block until the client closes stdin.
+		stdin, err := cmd.StdinPipe()
+		if err == nil {
+			err = cmd.Start()
+		}
+		outW.Close()
+		errW.Close()
+		if err != nil {
+			outR.Close()
+			errR.Close()
 			return nil, nil, err
 		}
 		go func() { io.Copy(stdin, ch); stdin.Close() }()
+		var copies sync.WaitGroup
+		copies.Go(func() { drain(ch, outR, exited) })
+		copies.Go(func() { drain(ch.Stderr(), errR, exited) })
 		go func() {
 			status := exitStatus(cmd.Wait())
 			close(exited)
+			copies.Wait() // all output is sent before the exit status
+			outR.Close()
+			errR.Close()
 			done <- status
 		}()
 	}
 
 	c.procs.Add(1)
-	go func() { <-exited; c.procs.Done() }()
+	go func() { <-exited; c.procs.Add(-1) }()
 
 	// Signal the whole session (pgid = pid thanks to Setsid), but never after
 	// it exited: the pid could belong to someone else by then.
@@ -312,10 +331,35 @@ func exitStatus(err error) uint32 {
 		}
 		return uint32(ee.ExitCode())
 	}
-	if err != nil && err != exec.ErrWaitDelay {
+	if err != nil {
 		return 255
 	}
 	return 0
+}
+
+// drain copies a session's output pipe to the client, however slowly it reads.
+// Once the process has exited, a pipe that stays silent for a second is given
+// up on: a background job may hold it open forever.
+func drain(w io.Writer, r *os.File, exited <-chan struct{}) {
+	idle := func() { r.SetReadDeadline(time.Now().Add(time.Second)) }
+	go func() { <-exited; idle() }()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			select {
+			case <-exited:
+				idle()
+			default:
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (c *conn) env(pt *ptyReq) []string {

@@ -28,7 +28,7 @@ func runKeys(args []string) error {
 	fromNode := fs.String("from-node", "", "only from this tailnet device")
 	noFwd := fs.Bool("no-port-forwarding", false, "refuse ssh -L")
 	if len(args) == 0 {
-		return errors.New("usage: android-sshd keys [-dir D] list | put [options] <public key> | rm <fingerprint>")
+		return errors.New("usage: android-sshd keys list|put|rm [-dir D] [options] [<public key> | <fingerprint>]")
 	}
 	cmd := args[0]
 	if err := fs.Parse(args[1:]); err != nil {
