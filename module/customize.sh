@@ -25,14 +25,15 @@ for f in sshd.conf authorized_keys; do
 done
 
 ui_print "- Installing the approval app"
-TMP=/data/local/tmp/android-sshd.apk
-cp "$MODPATH/app.apk" "$TMP" && chmod 644 "$TMP"
-# Each build has its own signing key; reinstall when the signature changed.
-if ! pm install -r "$TMP" >/dev/null 2>&1; then
+# Streamed from the module dir: no world-writable staging file to tamper with.
+APK="$MODPATH/app.apk"
+install_app() { pm install -r -S "$(stat -c %s "$APK")" <"$APK" 2>&1 | grep -q Success; }
+if ! install_app; then
+	# Signing key changed (e.g. a local build replacing a release): reinstall.
 	pm uninstall "$PKG" >/dev/null 2>&1
-	pm install "$TMP" >/dev/null 2>&1 || ui_print "! App install failed: logins that need approval will be denied"
+	install_app || ui_print "! App install failed: logins that need approval will be denied"
 fi
-rm -f "$TMP" "$MODPATH/app.apk"
+rm -f "$APK"
 pm grant "$PKG" android.permission.POST_NOTIFICATIONS 2>/dev/null
 
 # (Re)start from the staged module so it works before the first reboot.

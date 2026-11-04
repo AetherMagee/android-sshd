@@ -4,14 +4,16 @@
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Only root (uid 0 skips permission checks) and apps signed with this
+         app's key may send prompts; adb shell's uid can't. -->
+    <permission android:name="io.github.aethermagee.sshd.PROMPT" android:protectionLevel="signature" />
 
     <application android:label="SSH approvals" android:icon="@android:drawable/ic_lock_lock">
-        <!-- Prompts come from android-sshd (root) via `am broadcast`. Root
-             passes any permission check; DUMP keeps ordinary apps out. -->
+        <!-- Prompts come from android-sshd (root) via `am broadcast`. -->
         <receiver
             android:name=".PromptReceiver"
             android:exported="true"
-            android:permission="android.permission.DUMP" />
+            android:permission="io.github.aethermagee.sshd.PROMPT" />
         <receiver android:name=".DecisionReceiver" android:exported="false" />
     </application>
 </manifest>

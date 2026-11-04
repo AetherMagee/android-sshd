@@ -42,6 +42,8 @@ public class PromptReceiver extends BroadcastReceiver {
                 .setCategory(Notification.CATEGORY_STATUS)
                 .setTimeoutAfter(in.getIntExtra("timeout", 60) * 1000L)
                 .setDeleteIntent(decision(ctx, id, "deny"));
+        // Below API 31 actions can't require unlocking: keep the prompt off the lock screen.
+        if (Build.VERSION.SDK_INT < 31) b.setVisibility(Notification.VISIBILITY_SECRET);
         if (in.getBooleanExtra("window", false)) {
             b.addAction(action(ctx, id, "Allow 15 min", "allow 900", true));
             b.addAction(action(ctx, id, "Allow 1 h", "allow 3600", true));

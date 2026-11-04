@@ -4,7 +4,7 @@ A Magisk / KernelSU / APatch module with a small SSH server for rooted Android (
 
 - **Public-key auth**, plain OpenSSH `authorized_keys` format.
 - **Per-key privileges**: root, `shell` (same as `adb shell`: uid 2000, its groups and SELinux context) or any uid.
-- **Approval on the phone**: after the key checks out, a notification asks **Allow 15 min / Allow 1 h / Deny** (Allow needs the phone unlocked). One approval covers that key from that device for the chosen time; no answer within a minute means deny.
+- **Approval on the phone**: after the key checks out, a notification asks **Allow 15 min / Allow 1 h / Deny** (Allow needs the phone unlocked; before Android 12 the prompt is hidden from the lock screen instead). One approval covers that key from that device for the chosen time; no answer within a minute means deny.
 - **Max connection age**: connections are closed after a per-key limit (default 8h), even if active, with a warning a minute before.
 - **Tailscale-aware**: by default only tailnet peers can connect, prompts name the device (`tailscale whois`), and keys can be pinned to a device. Works with [android-tailscaled](https://github.com/AetherMagee/android-tailscaled).
 - **WebUI** (KernelSU / APatch / MMRL): add, edit and remove keys, server settings, logs.

@@ -44,7 +44,12 @@ jobs:
 
       - name: Build
         if: steps.v.outputs.skip != 'true'
-        run: ./build.sh # ubuntu-latest ships the Android SDK in $ANDROID_HOME
+        env:
+          APP_KEYSTORE: ${{ secrets.APP_KEYSTORE }}
+          APP_KEYSTORE_PASS: ${{ secrets.APP_KEYSTORE_PASS }}
+        run: |
+          [ -n "$APP_KEYSTORE" ] || { echo "APP_KEYSTORE secret missing"; exit 1; }
+          ./build.sh # ubuntu-latest ships the Android SDK in $ANDROID_HOME
 
       - name: Publish
         if: steps.v.outputs.skip != 'true'

@@ -38,11 +38,22 @@ find "$ROOT/app/src" -name '*.java' -exec javac -Xlint:-options --release 17 -cl
 find "$APP/classes" -name '*.class' -exec "$BT/d8" --release --min-api 26 --lib "$JAR" --output "$APP/dex" {} +
 (cd "$APP/dex" && zip -qj "$APP/unsigned.apk" classes.dex)
 "$BT/zipalign" -f 4 "$APP/unsigned.apk" "$APP/aligned.apk"
-# Throwaway key per build: the app is stateless, and customize.sh reinstalls
-# it when the signature changes. Nothing to keep secret.
-keytool -genkeypair -keystore "$APP/key.jks" -storepass android -alias app -keyalg EC \
-	-dname CN=android-sshd -validity 10000 >/dev/null 2>&1
-"$BT/apksigner" sign --ks "$APP/key.jks" --ks-pass pass:android --out "$APP/app.apk" "$APP/aligned.apk"
+# Releases are signed with a stable secret key (CI: APP_KEYSTORE, base64 PKCS12 with
+# password APP_KEYSTORE_PASS) so updates keep the app and its notification settings.
+# Local builds get a throwaway key; customize.sh reinstalls when the key changes.
+# The key must stay secret: it grants the permission that guards prompts.
+if [ -n "${APP_KEYSTORE:-}" ]; then
+	base64 -d <<<"$APP_KEYSTORE" >"$APP/key.p12"
+	KS_PASS="env:APP_KEYSTORE_PASS"
+else
+	APP_KEYSTORE_PASS=$(head -c 18 /dev/urandom | base64)
+	export APP_KEYSTORE_PASS
+	keytool -genkeypair -keystore "$APP/key.p12" -storetype PKCS12 -storepass:env APP_KEYSTORE_PASS \
+		-alias app -keyalg EC -dname CN=android-sshd -validity 10000 >/dev/null 2>&1
+	KS_PASS="env:APP_KEYSTORE_PASS"
+fi
+"$BT/apksigner" sign --ks "$APP/key.p12" --ks-pass "$KS_PASS" --out "$APP/app.apk" "$APP/aligned.apk"
+rm -f "$APP/key.p12"
 
 echo "==> packaging"
 STAGE="$WORK/module"
