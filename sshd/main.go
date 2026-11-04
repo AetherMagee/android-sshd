@@ -33,9 +33,18 @@ type server struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "sftp" {
-		runSFTP()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "sftp":
+			runSFTP()
+			return
+		case "keys":
+			if err := runKeys(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
 	}
 	dir := flag.String("dir", "/data/adb/sshd", "state dir: authorized_keys, host key, root's home")
 	addr := flag.String("listen", ":22", "listen address")
@@ -133,14 +142,18 @@ func (s *server) handle(c net.Conn) {
 		return
 	}
 
-	keys := map[string]*keyOpts{} // fingerprint -> options, for keys offered on this connection
+	type offered struct {
+		opts    *keyOpts
+		comment string
+	}
+	keys := map[string]offered{} // by fingerprint, for keys offered on this connection
 	var preAuth ssh.ServerPreAuthConn
 	cfg := &ssh.ServerConfig{
 		ServerVersion:       "SSH-2.0-android-sshd",
 		PreAuthConnCallback: func(c ssh.ServerPreAuthConn) { preAuth = c },
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			fp := ssh.FingerprintSHA256(key)
-			o, err := findKey(s.keysPath, key)
+			o, comment, err := findKey(s.keysPath, key)
 			if err != nil {
 				log.Printf("%s: %v", from, err)
 				return nil, err
@@ -149,18 +162,19 @@ func (s *server) handle(c net.Conn) {
 				return nil, errors.New("unknown key")
 			}
 			if o.fromNode != "" && !strings.EqualFold(o.fromNode, from.name) {
-				return nil, fmt.Errorf("key %q only allowed from %s", o.comment, o.fromNode)
+				return nil, fmt.Errorf("key %q only allowed from %s", comment, o.fromNode)
 			}
-			keys[fp] = o
+			keys[fp] = offered{o, comment}
 			return &ssh.Permissions{Extensions: map[string]string{"fp": fp}}, nil
 		},
 		// Runs only after the client proved it holds the key, so a stranger
 		// who knows a public key can't trigger prompts.
 		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, perms *ssh.Permissions, _ string) (*ssh.Permissions, error) {
 			fp := perms.Extensions["fp"]
-			o := keys[fp]
+			k := keys[fp]
+			o := k.opts
 			title := fmt.Sprintf("SSH login as %s", o.user)
-			text := fmt.Sprintf("From %s\nKey %s %s", from, o.comment, fp)
+			text := fmt.Sprintf("From %s\nKey %s %s", from, k.comment, fp)
 			stop := make(chan struct{})
 			var wg sync.WaitGroup
 			err := s.approver.approve(o.approve, fp+"|"+from.id, title, text, func() {
@@ -170,7 +184,7 @@ func (s *server) handle(c net.Conn) {
 			close(stop)
 			wg.Wait() // no banners after auth completes
 			if err != nil {
-				log.Printf("%s: key %q: %v", from, o.comment, err)
+				log.Printf("%s: key %q: %v", from, k.comment, err)
 				return nil, err
 			}
 			return perms, nil
@@ -186,14 +200,15 @@ func (s *server) handle(c net.Conn) {
 		return
 	}
 	c.SetDeadline(time.Time{})
-	o := keys[sc.Permissions.Extensions["fp"]]
+	k := keys[sc.Permissions.Extensions["fp"]]
+	o := k.opts
 	acct, err := account(o.user, s.rootHome)
 	if err != nil {
 		log.Printf("%s: %v", from, err)
 		sc.Close()
 		return
 	}
-	log.Printf("%s: logged in as %s with key %q (max-age %s)", from, o.user, o.comment, o.maxAge)
+	log.Printf("%s: logged in as %s with key %q (max-age %s)", from, o.user, k.comment, o.maxAge)
 	s.serveConn(sc, chans, reqs, o, acct)
 	log.Printf("%s: disconnected", from)
 }

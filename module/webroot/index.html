@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SSH</title>
+<style>
+	:root {
+		--bg: #f4f4f6; --card: #fff; --fg: #18181b; --muted: #71717a; --line: #e4e4e7;
+		--accent: #2563eb; --ok: #16a34a; --warn: #d97706; --bad: #dc2626;
+		color-scheme: light dark;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root { --bg: #0b0b0d; --card: #18181b; --fg: #f4f4f5; --muted: #a1a1aa; --line: #27272a; --accent: #60a5fa; }
+	}
+	* { box-sizing: border-box; }
+	body {
+		margin: 0; padding: max(16px, env(safe-area-inset-top)) 14px 40px;
+		font: 15px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg);
+	}
+	h1 { font-size: 22px; margin: 4px 2px 14px; display: flex; align-items: center; gap: 10px; }
+	h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+	.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+	.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; }
+	.row + .row { border-top: 1px solid var(--line); }
+	.row .label small { display: block; color: var(--muted); font-size: 12px; }
+	.muted { color: var(--muted); }
+	.mono { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+	.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; }
+	.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+	.btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+	button {
+		font: inherit; font-size: 14px; border: 1px solid var(--line); background: transparent; color: var(--fg);
+		padding: 8px 14px; border-radius: 10px;
+	}
+	button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+	button.danger { color: var(--bad); }
+	button.small { padding: 4px 10px; font-size: 13px; }
+	button:disabled { opacity: .5; }
+	input[type=text], input[type=number], select, textarea {
+		font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+		border-radius: 8px; padding: 7px 9px; width: 100%;
+	}
+	textarea { font-family: ui-monospace, monospace; font-size: 12px; min-height: 76px; resize: vertical; }
+	.field { margin: 10px 0; }
+	.field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+	.field small { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+	.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+	.switch { position: relative; width: 44px; height: 26px; flex: none; }
+	.switch input { opacity: 0; width: 0; height: 0; }
+	.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 13px; transition: .15s; }
+	.switch span::before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .15s; }
+	.switch input:checked + span { background: var(--accent); }
+	.switch input:checked + span::before { transform: translateX(18px); }
+	.key { padding: 10px 0; }
+	.key + .key { border-top: 1px solid var(--line); }
+	.key .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.key .fp { color: var(--muted); font-size: 12px; }
+	.tags { margin-top: 4px; }
+	.tag { font-size: 11px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); margin-right: 4px; display: inline-block; }
+	.tag.root { color: var(--warn); border-color: var(--warn); }
+	.err { color: var(--bad); font-size: 13px; }
+	.warn { color: var(--warn); font-size: 13px; margin-top: 6px; }
+	.tabs { display: flex; gap: 6px; margin-bottom: 12px; overflow-x: auto; }
+	.tabs button.active { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+	pre { white-space: pre-wrap; word-break: break-all; margin: 0; max-height: 60vh; overflow: auto; }
+	#toast {
+		position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
+		padding: 9px 16px; border-radius: 10px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw;
+	}
+	#toast.show { opacity: 1; }
+	.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<h1><span class="dot" id="hdot"></span>SSH</h1>
+
+<div class="tabs">
+	<button data-tab="keys" class="active">Keys</button>
+	<button data-tab="settings">Settings</button>
+	<button data-tab="logs">Logs</button>
+</div>
+
+<section id="tab-keys">
+	<div class="card">
+		<h2>Server</h2>
+		<div class="row"><div class="label">Status</div><div id="s-status" class="muted">…</div></div>
+		<div class="row"><div class="label">Connect</div><div id="s-connect" class="mono">–</div></div>
+		<div class="row"><div class="label">Host key</div><div id="s-hostkey" class="mono muted">–</div></div>
+		<div id="s-warn"></div>
+		<div class="btns">
+			<button id="b-start">Start</button>
+			<button id="b-stop">Stop</button>
+			<button id="b-restart">Restart</button>
+		</div>
+	</div>
+
+	<div class="card">
+		<div class="row" style="padding-top:0">
+			<h2 style="margin:0">Keys</h2>
+			<button class="small primary" id="b-add">Add key</button>
+		</div>
+		<div id="keys" class="muted">…</div>
+	</div>
+
+	<div class="card hidden" id="editor">
+		<h2 id="e-title">Add key</h2>
+		<div class="field">
+			<label>Public key</label>
+			<textarea id="e-pub" placeholder="ssh-ed25519 AAAA… me@laptop" spellcheck="false" autocomplete="off"></textarea>
+			<small>Contents of <span class="mono">~/.ssh/id_ed25519.pub</span> (or similar) on the connecting device.</small>
+		</div>
+		<div class="grid">
+			<div class="field">
+				<label>Run as</label>
+				<select id="e-user">
+					<option value="root">root</option>
+					<option value="shell">shell (like adb shell)</option>
+					<option value="uid">uid…</option>
+				</select>
+				<input type="number" id="e-uid" class="hidden" min="0" placeholder="10123" style="margin-top:6px">
+			</div>
+			<div class="field">
+				<label>Approval on the phone</label>
+				<select id="e-approve">
+					<option value="window">ask, then allow 15 min / 1 h</option>
+					<option value="always">ask every connection</option>
+					<option value="never">never ask</option>
+				</select>
+			</div>
+			<div class="field">
+				<label>Max connection age</label>
+				<input type="text" id="e-maxage" placeholder="8h">
+				<small>e.g. 30m, 8h, 24h</small>
+			</div>
+			<div class="field">
+				<label>Only from device</label>
+				<input type="text" id="e-node" list="nodes" placeholder="any" autocomplete="off">
+				<datalist id="nodes"></datalist>
+			</div>
+		</div>
+		<div class="row">
+			<div class="label">Port forwarding<small>Allow ssh -L through the phone</small></div>
+			<label class="switch"><input type="checkbox" id="e-fwd" checked><span></span></label>
+		</div>
+		<div class="btns">
+			<button class="primary" id="e-save">Save</button>
+			<button id="e-cancel">Cancel</button>
+		</div>
+	</div>
+</section>
+
+<section id="tab-settings" class="hidden">
+	<div class="card">
+		<h2>Server settings</h2>
+		<div class="field">
+			<label>Port</label>
+			<input type="number" id="c-port" min="1" max="65535">
+		</div>
+		<div class="row">
+			<div class="label">Tailnet only<small>Accept only Tailscale peers; off also allows Wi-Fi and mobile networks</small></div>
+			<label class="switch"><input type="checkbox" id="c-tailnet"><span></span></label>
+		</div>
+		<div class="field">
+			<label>Approval timeout (seconds)</label>
+			<input type="number" id="c-timeout" min="10" max="600">
+			<small>Unanswered prompts are denied after this long.</small>
+		</div>
+		<div class="btns"><button class="primary" id="c-save">Save &amp; restart</button></div>
+		<p class="muted" style="font-size:13px;margin:12px 0 0">Restarting closes open connections and forgets approvals.</p>
+	</div>
+</section>
+
+<section id="tab-logs" class="hidden">
+	<div class="card">
+		<div class="row" style="padding-top:0">
+			<h2 style="margin:0">sshd.log</h2>
+			<button class="small" id="b-logs">Refresh</button>
+		</div>
+		<pre id="logs" class="mono muted">…</pre>
+	</div>
+</section>
+
+<div id="toast"></div>
+
+<script>
+const DATA = "/data/adb/sshd";
+const CONF = DATA + "/sshd.conf";
+// A freshly installed/updated module runs from modules_update until reboot.
+const BIN = 'B=/data/adb/modules_update/android-sshd/system/bin; [ -x "$B/android-sshd" ] || B=/data/adb/modules/android-sshd/system/bin; ';
+const SSHD = BIN + '"$B/android-sshd" ';
+const SVC = BIN + '"$B/sshd.service" ';
+
+let cb = 0;
+function exec(cmd) {
+	return new Promise((resolve) => {
+		const name = "__sshd_cb" + (cb++);
+		window[name] = (errno, stdout, stderr) => { delete window[name]; resolve({ errno, stdout, stderr }); };
+		try { ksu.exec(cmd, "{}", name); }
+		catch (e) { delete window[name]; resolve({ errno: -1, stdout: "", stderr: "Not running in a root manager WebUI: " + e }); }
+	});
+}
+const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const lastLine = (r) => (r.stdout + r.stderr).trim().split("\n").pop() || "failed";
+
+let toastTimer;
+function toast(msg) {
+	const t = $("toast");
+	t.textContent = msg; t.classList.add("show");
+	clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+let keys = [], conf = "", editing = null;
+
+// "KEY=value" from sshd.conf, unquoted.
+const confGet = (k, d) => {
+	const m = conf.match(new RegExp("^" + k + "=(.*)$", "m"));
+	return m ? m[1].replace(/^"(.*)"$/, "$1") : d;
+};
+
+async function refresh() {
+	const [svc, list, cf, ts] = await Promise.all([
+		exec(SVC + "status"),
+		exec(SSHD + "keys list"),
+		exec("cat " + q(CONF)),
+		exec("tailscale status --json 2>/dev/null"),
+	]);
+	conf = cf.stdout;
+	let data = { keys: [] };
+	try { data = JSON.parse(list.stdout); } catch { toast("Could not read keys: " + lastLine(list)); }
+	keys = data.keys;
+	let status = null;
+	try { status = JSON.parse(ts.stdout); } catch {}
+
+	const up = svc.errno === 0;
+	$("hdot").className = "dot " + (up ? "ok" : "bad");
+	$("s-status").textContent = up ? svc.stdout.trim() : "stopped";
+	$("b-start").disabled = up;
+	$("b-stop").disabled = !up;
+	$("s-hostkey").textContent = data.hostKey || "–";
+	const port = confGet("PORT", "22");
+	const self = status?.Self;
+	const host = self ? (self.DNSName || "").split(".")[0] || self.HostName : "<phone>";
+	$("s-connect").textContent = "ssh " + (port === "22" ? "" : "-p " + port + " ") + "root@" + host;
+
+	const warns = [];
+	if (confGet("TAILNET_ONLY", "1") === "1" && status?.BackendState !== "Running")
+		warns.push("Tailscale isn't running: tailnet-only mode accepts no connections.");
+	if (port === "22") {
+		const prefs = await exec("tailscale debug prefs 2>/dev/null");
+		try { if (JSON.parse(prefs.stdout).RunSSH) warns.push("Tailscale SSH is on and takes port 22 on tailnet IPs. Turn it off (tailscale set --ssh=false) or change the port."); } catch {}
+	}
+	$("s-warn").innerHTML = warns.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("");
+
+	const peers = Object.values(status?.Peer || {}).map((p) => (p.DNSName || "").split(".")[0] || p.HostName).filter(Boolean).sort();
+	$("nodes").innerHTML = peers.map((n) => `<option value="${esc(n)}">`).join("");
+
+	renderKeys();
+	loadConf();
+}
+
+function renderKeys() {
+	if (!keys.length) {
+		$("keys").innerHTML = '<div class="muted">No keys yet. Add the public key of each device that should log in.</div>';
+		return;
+	}
+	$("keys").innerHTML = keys.map((k, i) => {
+		if (!k.fingerprint) return `<div class="key"><div class="err">Line ${k.line}: not a valid key</div></div>`;
+		const tags = k.error ? `<div class="err">${esc(k.error)} (key disabled)</div>` : `<div class="tags">
+			<span class="tag ${k.user === "root" ? "root" : ""}">${k.user === "root" || k.user === "shell" ? esc(k.user) : "uid " + esc(k.user)}</span>
+			<span class="tag">${{ window: "ask, then window", always: "ask always", never: "no approval" }[k.approve]}</span>
+			<span class="tag">max ${esc(k.maxAge)}</span>
+			${k.fromNode ? `<span class="tag">from ${esc(k.fromNode)}</span>` : ""}
+			${k.noPortForwarding ? '<span class="tag">no forwarding</span>' : ""}
+		</div>`;
+		return `<div class="key">
+			<div class="row" style="padding:0">
+				<div style="min-width:0">
+					<div class="name">${esc(k.comment || "(no comment)")}</div>
+					<div class="fp mono">${esc(k.fingerprint)}</div>
+				</div>
+				<div style="display:flex;gap:6px;flex:none">
+					${k.error ? "" : `<button class="small" data-edit="${i}">Edit</button>`}
+					<button class="small danger" data-rm="${i}">Remove</button>
+				</div>
+			</div>${tags}</div>`;
+	}).join("");
+}
+
+function openEditor(k) {
+	editing = k;
+	$("e-title").textContent = k ? "Edit key" : "Add key";
+	$("e-pub").value = k ? k.publicKey : "";
+	$("e-pub").readOnly = !!k;
+	const user = k?.user || "root";
+	$("e-user").value = user === "root" || user === "shell" ? user : "uid";
+	$("e-uid").value = $("e-user").value === "uid" ? user : "";
+	$("e-uid").classList.toggle("hidden", $("e-user").value !== "uid");
+	$("e-approve").value = k?.approve || "window";
+	$("e-maxage").value = k?.maxAge || "8h";
+	$("e-node").value = k?.fromNode || "";
+	$("e-fwd").checked = !k?.noPortForwarding;
+	$("editor").classList.remove("hidden");
+	$("editor").scrollIntoView({ behavior: "smooth" });
+	if (!k) $("e-pub").focus();
+}
+
+function closeEditor() {
+	editing = null;
+	$("editor").classList.add("hidden");
+}
+
+async function saveKey() {
+	const pub = $("e-pub").value.trim().replace(/\s+/g, " ");
+	if (!pub) return toast("Paste a public key");
+	if (pub.includes("PRIVATE KEY")) return toast("That's a private key. Paste the .pub file instead");
+	const user = $("e-user").value === "uid" ? $("e-uid").value.trim() : $("e-user").value;
+	if (!/^(root|shell|\d+)$/.test(user)) return toast("Enter a numeric uid");
+	const args = ["-user", user, "-approve", $("e-approve").value, "-max-age", $("e-maxage").value.trim() || "8h"];
+	const node = $("e-node").value.trim();
+	if (node) args.push("-from-node", node);
+	if (!$("e-fwd").checked) args.push("-no-port-forwarding");
+	const r = await exec(SSHD + "keys put " + args.map(q).join(" ") + " " + q(pub) + " 2>&1");
+	if (r.errno !== 0) return toast(lastLine(r));
+	toast(editing ? "Key updated" : "Key added");
+	closeEditor();
+	await refresh();
+}
+
+async function removeKey(k) {
+	if (!confirm(`Remove ${k.comment || k.fingerprint}? Open connections with this key stay open until they end.`)) return;
+	const r = await exec(SSHD + "keys rm " + q(k.fingerprint) + " 2>&1");
+	toast(r.errno === 0 ? "Key removed" : lastLine(r));
+	await refresh();
+}
+
+function loadConf() {
+	$("c-port").value = confGet("PORT", "22");
+	$("c-tailnet").checked = confGet("TAILNET_ONLY", "1") === "1";
+	$("c-timeout").value = confGet("PROMPT_TIMEOUT", "60");
+}
+
+async function saveConf() {
+	const port = $("c-port").value, timeout = $("c-timeout").value;
+	if (!/^\d+$/.test(port) || port < 1 || port > 65535) return toast("Port must be 1-65535");
+	if (!/^\d+$/.test(timeout) || timeout < 10) return toast("Timeout must be at least 10 seconds");
+	// Replace the values in place so comments and EXTRA_ARGS survive.
+	const set = { PORT: port, TAILNET_ONLY: $("c-tailnet").checked ? "1" : "0", PROMPT_TIMEOUT: timeout };
+	let body = conf;
+	for (const [k, v] of Object.entries(set)) {
+		const re = new RegExp("^" + k + "=.*$", "m");
+		body = re.test(body) ? body.replace(re, k + "=" + v) : body.replace(/\n?$/, "\n" + k + "=" + v + "\n");
+	}
+	const w = await exec("printf %s " + q(body) + " > " + q(CONF));
+	if (w.errno !== 0) return toast("Could not write config: " + lastLine(w));
+	await service("restart", "Saved, server restarted");
+}
+
+async function service(cmd, okMsg) {
+	const r = await exec(SVC + cmd + " 2>&1");
+	toast(r.errno === 0 ? okMsg : lastLine(r));
+	await refresh();
+}
+
+async function loadLogs() {
+	const r = await exec("tail -n 300 " + q(DATA + "/sshd.log"));
+	$("logs").textContent = r.stdout || r.stderr || "(empty)";
+	$("logs").scrollTop = $("logs").scrollHeight;
+}
+
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+	document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("active", x === b));
+	document.querySelectorAll("section").forEach((s) => s.classList.toggle("hidden", s.id !== "tab-" + b.dataset.tab));
+	if (b.dataset.tab === "logs") loadLogs();
+});
+$("keys").onclick = (e) => {
+	const i = e.target.dataset.edit ?? e.target.dataset.rm;
+	if (i === undefined) return;
+	if (e.target.dataset.edit !== undefined) openEditor(keys[i]); else removeKey(keys[i]);
+};
+$("b-add").onclick = () => openEditor(null);
+$("e-cancel").onclick = closeEditor;
+$("e-save").onclick = saveKey;
+$("e-user").onchange = () => $("e-uid").classList.toggle("hidden", $("e-user").value !== "uid");
+$("c-save").onclick = saveConf;
+$("b-start").onclick = () => service("start", "Started");
+$("b-stop").onclick = () => service("stop", "Stopped");
+$("b-restart").onclick = () => service("restart", "Restarted");
+$("b-logs").onclick = loadLogs;
+
+refresh();
+</script>
+</body>
+</html>

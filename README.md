@@ -7,11 +7,12 @@ A Magisk / KernelSU / APatch module with a small SSH server for rooted Android (
 - **Approval on the phone**: after the key checks out, a notification asks **Allow 15 min / Allow 1 h / Deny** (Allow needs the phone unlocked). One approval covers that key from that device for the chosen time; no answer within a minute means deny.
 - **Max connection age**: connections are closed after a per-key limit (default 8h), even if active, with a warning a minute before.
 - **Tailscale-aware**: by default only tailnet peers can connect, prompts name the device (`tailscale whois`), and keys can be pinned to a device. Works with [android-tailscaled](https://github.com/AetherMagee/android-tailscaled).
+- **WebUI** (KernelSU / APatch / MMRL): add, edit and remove keys, server settings, logs.
 
 ## Install
 
 1. Download the zip from [Releases](https://github.com/AetherMagee/android-sshd/releases/latest) and install it in your root manager. It also installs the small "SSH approvals" app that shows the prompts.
-2. Add your public key to `/data/adb/sshd/authorized_keys`.
+2. Add your public key in the WebUI, or to `/data/adb/sshd/authorized_keys`.
 3. `ssh root@<phone>`.
 
 Port 22 on tailnet IPs goes to Tailscale SSH if that's enabled; turn it off (`tailscale set --ssh=false`) or set another `PORT` in `/data/adb/sshd/sshd.conf`.
@@ -46,7 +47,9 @@ Any other option (e.g. OpenSSH's `command=`) makes the key unusable rather than 
 | `/data/adb/sshd/sshd.conf` | port, tailnet-only, prompt timeout |
 | `/data/adb/sshd/` | keys, settings, host key, log, root's home; kept on uninstall |
 
-Supported: shell (with pty), exec, sftp/scp, local forwarding (`ssh -L`). Not supported: remote forwarding (`-R`), agent and X11 forwarding, legacy `scp -O`.
+Supported: shell (with pty), exec, sftp/scp, local forwarding (`ssh -L`), connection multiplexing (`ControlMaster`). Not supported: remote forwarding (`-R`), agent and X11 forwarding, legacy `scp -O`.
+
+Approval and max-age apply per connection: sessions multiplexed over a `ControlMaster` connection ride its approval and close with it.
 
 ## Limitations
 
@@ -54,6 +57,9 @@ Supported: shell (with pty), exec, sftp/scp, local forwarding (`ssh -L`). Not su
 - sftp as non-root users works after the first reboot (it needs the module's binary mounted into `/system/bin`).
 - Apps with notification access (smartwatch bridges, KDE Connect, ...) can press the notification's buttons, bypassing the unlock requirement.
 - Approval windows live in memory: restarting the daemon forgets them.
+- A numeric `user=` uid keeps the root manager's SELinux context; only `shell` switches context too.
+- Port forwarding connects from the server process (root), whatever the key's `user=`. Use `no-port-forwarding` on keys that shouldn't reach the phone's network as root.
+- Approvals are read from the companion app's private storage. If the app is uninstalled, another app installed under the same package name could answer prompts (it still can't log in without a key).
 
 ## Building
 
