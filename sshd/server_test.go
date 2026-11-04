@@ -63,6 +63,7 @@ func newEnv(t *testing.T) *env {
 		hostKey:  hk,
 		approver: newApprover(phone.prompt, 5*time.Second),
 		whois:    func(string) (peer, error) { return peer{}, errors.New("no tailscale") },
+		preAuth:  make(chan struct{}, maxPreAuth),
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -346,3 +347,30 @@ type fakeConn struct {
 }
 
 func (f fakeConn) RemoteAddr() net.Addr { a, _ := net.ResolveTCPAddr("tcp", f.addr); return a }
+
+func TestPreAuthCap(t *testing.T) {
+	e := newEnv(t)
+	var idle []net.Conn
+	for i := 0; i < maxPreAuth; i++ {
+		c, err := net.Dial("tcp", e.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		idle = append(idle, c)
+	}
+	time.Sleep(200 * time.Millisecond)
+	// The next connection is closed without a server banner.
+	c, _ := net.Dial("tcp", e.addr)
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := c.Read(make([]byte, 64)); err != io.EOF {
+		t.Fatalf("over the cap: read %d bytes, %v; want EOF", n, err)
+	}
+	// Freeing a slot lets new logins in again.
+	idle[0].Close()
+	time.Sleep(200 * time.Millisecond)
+	if out, err := e.run(e.key(`approve="never"`), "echo ok"); err != nil || out != "ok\n" {
+		t.Fatalf("after freeing a slot: %q, %v", out, err)
+	}
+}

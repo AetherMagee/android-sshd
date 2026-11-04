@@ -30,7 +30,10 @@ type server struct {
 	hostKey     ssh.Signer
 	approver    *approver
 	whois       func(ip string) (peer, error)
+	preAuth     chan struct{} // bounds connections that haven't authenticated yet
 }
+
+const maxPreAuth = 16
 
 func main() {
 	if len(os.Args) > 1 {
@@ -75,6 +78,7 @@ func main() {
 		hostKey:     hostKey,
 		approver:    newApprover(appPrompt, *timeout),
 		whois:       tailscaleWhois,
+		preAuth:     make(chan struct{}, maxPreAuth),
 	}
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -136,6 +140,21 @@ func (s *server) identify(c net.Conn) (peer, error) {
 
 func (s *server) handle(c net.Conn) {
 	defer c.Close()
+	select {
+	case s.preAuth <- struct{}{}:
+	default:
+		log.Printf("%s: rejected: %d connections already authenticating", c.RemoteAddr(), maxPreAuth)
+		return
+	}
+	authing := true
+	release := func() {
+		if authing {
+			authing = false
+			<-s.preAuth
+		}
+	}
+	defer release()
+
 	from, err := s.identify(c)
 	if err != nil {
 		log.Printf("%s: rejected: %v", c.RemoteAddr(), err)
@@ -200,6 +219,7 @@ func (s *server) handle(c net.Conn) {
 		return
 	}
 	c.SetDeadline(time.Time{})
+	release()
 	k := keys[sc.Permissions.Extensions["fp"]]
 	o := k.opts
 	acct, err := account(o.user, s.rootHome)
