@@ -55,7 +55,7 @@ Approval and max-age apply per connection: sessions multiplexed over a `ControlM
 
 - arm64 only.
 - sftp as non-root users needs the module's binary mounted into `/system/bin`: after the first reboot, and on KernelSU only with a mounting metamodule.
-- Apps with notification access (smartwatch bridges, KDE Connect, ...) can press the notification's buttons, bypassing the unlock requirement.
+- Apps with notification access (smartwatch bridges, KDE Connect, ...) can press the notification's buttons, bypassing the unlock requirement. So can anything with shell-uid access (adb, a `user="shell"` session) via `input tap` while the phone is unlocked: approval guards against a stolen key, not against someone already on the phone.
 - Approval windows live in memory: restarting the daemon forgets them.
 - A numeric `user=` uid keeps the root manager's SELinux context; only `shell` switches context too.
 - `user="shell"` is not a hard boundary if your root manager grants `su` to the shell uid (e.g. after allowing it for adb).

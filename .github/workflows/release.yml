@@ -44,11 +44,16 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - name: Test
+        if: steps.v.outputs.skip != 'true'
+        run: cd sshd && go test -race ./...
+
       - name: Build
         if: steps.v.outputs.skip != 'true'
         env:
           APP_KEYSTORE: ${{ secrets.APP_KEYSTORE }}
           APP_KEYSTORE_PASS: ${{ secrets.APP_KEYSTORE_PASS }}
+          SKIP_TESTS: 1 # tested above, without the signing key in the environment
         run: |
           [ -n "$APP_KEYSTORE" ] || { echo "APP_KEYSTORE secret missing"; exit 1; }
           ./build.sh # ubuntu-latest ships the Android SDK in $ANDROID_HOME
@@ -70,7 +75,7 @@ jobs:
           if gh release view "$VERSION" >/dev/null 2>&1; then
             gh release upload "$VERSION" "$ZIP" --clobber
           else
-            gh release create "$VERSION" "$ZIP" --title "$VERSION" --notes-file notes.md
+            gh release create "$VERSION" "$ZIP" --title "$VERSION" --notes-file notes.md --target "$GITHUB_SHA"
           fi
           cat >update.json <<EOT
           {
@@ -84,4 +89,5 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add update.json CHANGELOG.md
           git commit -m "chore: release $VERSION"
-          for i in 1 2 3; do git pull --rebase -q && git push && break; sleep 5; done
+          for i in 1 2 3; do git pull --rebase -q && git push && exit 0; sleep 5; done
+          exit 1

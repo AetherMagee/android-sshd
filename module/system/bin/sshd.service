@@ -20,6 +20,9 @@ set_desc() {
 }
 
 start() {
+	# Boot, the WebUI and module toggling can race; one start at a time.
+	mkdir "$DATA/.starting" 2>/dev/null || { echo "android-sshd is already starting"; return 1; }
+	trap 'rmdir "$DATA/.starting" 2>/dev/null' EXIT
 	if p=$(pid); then echo "android-sshd already running (pid $p)"; return 0; fi
 	PORT=22 TAILNET_ONLY=1 PROMPT_TIMEOUT=60 EXTRA_ARGS=""
 	# shellcheck source=/dev/null
@@ -28,13 +31,19 @@ start() {
 	[ "$TAILNET_ONLY" = 1 ] || tailnet=false
 
 	# Started from the WebUI we'd sit in the root manager app's cgroup, which
-	# Android kills along with the app: move to the root cgroup first.
+	# Android kills along with the app: move to the root cgroup first. Likewise
+	# its mount namespace may hide app data (where approvals arrive): use init's.
 	echo $$ >/sys/fs/cgroup/cgroup.procs 2>/dev/null
+	NS=""
+	if [ "$(readlink /proc/1/ns/mnt)" != "$(readlink /proc/self/ns/mnt)" ] && command -v nsenter >/dev/null; then
+		NS="nsenter -t 1 -m --"
+	fi
 
 	[ -f "$LOG" ] && mv -f "$LOG" "$LOG.old"
+	# setsid, not nohup: an inherited SIGHUP ignore would reach every session.
 	# shellcheck disable=SC2086
-	nohup "$BIN" --dir="$DATA" --listen=":$PORT" --tailnet-only="$tailnet" \
-		--prompt-timeout="${PROMPT_TIMEOUT}s" $EXTRA_ARGS >"$LOG" 2>&1 &
+	$NS setsid "$BIN" --dir="$DATA" --listen=":$PORT" --tailnet-only="$tailnet" \
+		--prompt-timeout="${PROMPT_TIMEOUT}s" $EXTRA_ARGS >"$LOG" 2>&1 </dev/null &
 	echo $! >"$PIDFILE"
 	sleep 1
 	if p=$(pid); then
