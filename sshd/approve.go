@@ -57,9 +57,12 @@ func (a *approver) approve(mode, id, title, text string, wait func()) error {
 	}
 
 	a.mu.Lock()
-	if time.Now().Before(a.until[id]) {
-		a.mu.Unlock()
-		return nil
+	if until, ok := a.until[id]; ok {
+		if time.Now().Before(until) {
+			a.mu.Unlock()
+			return nil
+		}
+		delete(a.until, id)
 	}
 	p, ok := a.pending[id]
 	if !ok {
@@ -174,11 +177,29 @@ func (p peer) String() string {
 	return p.ip
 }
 
+// tailscaleBin finds the tailscale CLI: on PATH, or in android-tailscaled's
+// module dir when the root manager doesn't mount modules into /system
+// (KernelSU without a metamodule, or before the first reboot).
+func tailscaleBin() string {
+	if p, err := exec.LookPath("tailscale"); err == nil {
+		return p
+	}
+	for _, p := range []string{
+		"/data/adb/modules_update/android-tailscaled/system/bin/tailscale",
+		"/data/adb/modules/android-tailscaled/system/bin/tailscale",
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "tailscale"
+}
+
 // tailscaleWhois identifies a tailnet IP via the tailscale CLI.
 func tailscaleWhois(ip string) (peer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tailscale", "whois", "--json", ip).Output()
+	out, err := exec.CommandContext(ctx, tailscaleBin(), "whois", "--json", ip).Output()
 	if err != nil {
 		return peer{}, fmt.Errorf("tailscale whois %s: %w", ip, err)
 	}

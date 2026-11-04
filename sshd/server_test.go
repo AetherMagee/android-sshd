@@ -41,10 +41,12 @@ func (f *fakePhone) prompt(ctx context.Context, title, text string, window bool)
 }
 
 type env struct {
-	t     *testing.T
-	addr  string
-	phone *fakePhone
-	keys  string
+	t        *testing.T
+	addr     string
+	phone    *fakePhone
+	keys     string
+	shutdown context.CancelFunc // what SIGTERM does in main
+	srv      *server
 }
 
 func newEnv(t *testing.T) *env {
@@ -64,14 +66,18 @@ func newEnv(t *testing.T) *env {
 		approver: newApprover(phone.prompt, 5*time.Second),
 		whois:    func(string) (peer, error) { return peer{}, errors.New("no tailscale") },
 		preAuth:  make(chan struct{}, maxPreAuth),
+		baseEnv:  os.Environ(),
 	}
+	var shutdown context.CancelFunc
+	s.ctx, shutdown = context.WithCancel(context.Background())
+	t.Cleanup(shutdown)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
 	go s.serve(ln)
-	return &env{t: t, addr: ln.Addr().String(), phone: phone, keys: s.keysPath}
+	return &env{t: t, addr: ln.Addr().String(), phone: phone, keys: s.keysPath, shutdown: shutdown, srv: s}
 }
 
 // key adds a fresh key with the given options and returns its signer.
@@ -430,5 +436,36 @@ func TestChannelCloseKillsSession(t *testing.T) {
 		if alive {
 			t.Fatalf("pty=%v: process %d still running after the channel closed", withPty, pid)
 		}
+	}
+}
+
+// Stopping the daemon must end sessions too: exec sessions run in their own
+// process group and would otherwise outlive it (and their max-age).
+func TestShutdownEndsSessions(t *testing.T) {
+	e := newEnv(t)
+	c, err := e.dial(e.key(`approve="never"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	s, _ := c.NewSession()
+	s.Start("echo $$ > " + pidFile + "; exec sleep 300")
+	var pid int
+	for i := 0; i < 50 && pid == 0; i++ {
+		time.Sleep(50 * time.Millisecond)
+		data, _ := os.ReadFile(pidFile)
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+	}
+	if pid == 0 {
+		t.Fatal("session didn't start")
+	}
+	e.shutdown()
+	done := make(chan struct{})
+	go func() { e.srv.procs.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("process %d still running after shutdown", pid)
 	}
 }

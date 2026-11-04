@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -14,9 +15,11 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -32,6 +35,10 @@ type server struct {
 	approver    *approver
 	whois       func(ip string) (peer, error)
 	preAuth     chan struct{} // bounds connections that haven't authenticated yet
+	baseEnv     []string      // environment for sessions, before per-session variables
+
+	ctx   context.Context // cancelled on shutdown: ends every session
+	procs sync.WaitGroup  // running session processes
 
 	mu    sync.Mutex
 	perIP map[string]int // connections per source IP that haven't authenticated yet
@@ -90,13 +97,28 @@ func main() {
 		approver:    newApprover(appPrompt, *timeout),
 		whois:       tailscaleWhois,
 		preAuth:     make(chan struct{}, maxPreAuth),
+		baseEnv:     androidEnv(),
 	}
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatal(err)
 	}
+	var stop context.CancelFunc
+	s.ctx, stop = signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	context.AfterFunc(s.ctx, func() { ln.Close() })
 	log.Printf("listening on %s (tailnet-only=%v), host key %s", ln.Addr(), s.tailnetOnly, ssh.FingerprintSHA256(hostKey.PublicKey()))
 	s.serve(ln)
+
+	// Sessions run in their own process groups and would outlive us (and their
+	// max-age): give the hangups (SIGHUP, then SIGKILL after 2s) time to land.
+	log.Print("stopping, ending sessions")
+	done := make(chan struct{})
+	go func() { s.procs.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+	}
 }
 
 func (s *server) serve(ln net.Listener) {
@@ -149,8 +171,12 @@ func (s *server) identify(c net.Conn) (peer, error) {
 	return peer{id: ip.String(), name: ip.String(), ip: ip.String()}, nil
 }
 
-// admit reserves a pre-auth slot for ip; release frees it.
+// admit reserves a pre-auth slot for ip; release frees it. IPv6 sources count
+// per /64, since one host usually holds a whole /64.
 func (s *server) admit(ip string) (release func(), ok bool) {
+	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() {
+		ip = netip.PrefixFrom(a, 64).Masked().String()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.perIP == nil {
@@ -232,6 +258,9 @@ func (s *server) handle(c net.Conn) {
 			// The options are part of the id: editing a key (e.g. to user=root)
 			// doesn't inherit approvals given for its old privileges.
 			err := s.approver.approve(o.approve, fp+"|"+from.id+"|"+o.format(), title, text, func() {
+				// The key is proven and the prompt has its own timeout: stop
+				// counting this connection against the handshake limits.
+				release()
 				c.SetDeadline(time.Now().Add(s.approver.timeout + handshakeTimeout))
 				preAuth.SendAuthBanner(fmt.Sprintf("android-sshd: approve this login on the phone (%s)...\n", s.approver.timeout))
 				wg.Go(func() { authKeepalive(preAuth, stop) })
@@ -362,4 +391,33 @@ func (l *logLimiter) printf(format string, args ...any) {
 		log.Printf("(%d similar lines dropped)", dropped)
 	}
 	log.Printf(format, args...)
+}
+
+// androidEnv is the environment `adb shell` gets: init's exports such as
+// BOOTCLASSPATH, which app_process tools (uiautomator, monkey, ...) need,
+// taken from zygote. Our own environment is whatever started the daemon
+// (e.g. the module installer). Falls back to that off Android.
+func androidEnv() []string {
+	dirs, _ := os.ReadDir("/proc")
+	for _, d := range dirs {
+		cmdline, err := os.ReadFile("/proc/" + d.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		if name, _, _ := strings.Cut(string(cmdline), "\x00"); name != "zygote64" && name != "zygote" {
+			continue
+		}
+		data, err := os.ReadFile("/proc/" + d.Name() + "/environ")
+		if err != nil {
+			break
+		}
+		var env []string
+		for _, kv := range strings.Split(string(data), "\x00") {
+			if kv != "" && !strings.HasPrefix(kv, "ANDROID_SOCKET_") {
+				env = append(env, kv)
+			}
+		}
+		return env
+	}
+	return os.Environ()
 }

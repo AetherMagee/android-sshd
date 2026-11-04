@@ -65,7 +65,11 @@ type conn struct {
 const maxAgeWarning = time.Minute
 
 func (s *server) serveConn(sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, o *keyOpts, a acct) {
-	ctx, cancel := context.WithCancel(context.Background())
+	base := s.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithCancel(base)
 	defer cancel()
 	c := &conn{server: s, sc: sc, opts: o, acct: a, ctx: ctx, sessions: map[ssh.Channel]bool{}}
 
@@ -275,6 +279,9 @@ func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint
 		}()
 	}
 
+	c.procs.Add(1)
+	go func() { <-exited; c.procs.Done() }()
+
 	// Signal the whole session (pgid = pid thanks to Setsid), but never after
 	// it exited: the pid could belong to someone else by then.
 	pid := cmd.Process.Pid
@@ -313,16 +320,13 @@ func exitStatus(err error) uint32 {
 
 func (c *conn) env(pt *ptyReq) []string {
 	var env []string
-	for _, kv := range os.Environ() {
+	for _, kv := range c.baseEnv {
 		k, _, _ := strings.Cut(kv, "=")
 		switch {
 		case k == "HOME", k == "USER", k == "LOGNAME", k == "SHELL", k == "TERM", strings.HasPrefix(k, "SSH_"):
 		default:
 			env = append(env, kv)
 		}
-	}
-	if os.Getenv("PATH") == "" {
-		env = append(env, "PATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin")
 	}
 	rh, rp, _ := net.SplitHostPort(c.sc.RemoteAddr().String())
 	lh, lp, _ := net.SplitHostPort(c.sc.LocalAddr().String())

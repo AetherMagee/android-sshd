@@ -190,6 +190,8 @@ const CONF = DATA + "/sshd.conf";
 const BIN = 'B=/data/adb/modules_update/android-sshd/system/bin; [ -x "$B/android-sshd" ] || B=/data/adb/modules/android-sshd/system/bin; ';
 const SSHD = BIN + '"$B/android-sshd" ';
 const SVC = BIN + '"$B/sshd.service" ';
+// android-tailscaled's CLI, also when the root manager doesn't mount it into /system/bin.
+const TS = 'T=$(command -v tailscale || ls /data/adb/modules_update/android-tailscaled/system/bin/tailscale /data/adb/modules/android-tailscaled/system/bin/tailscale 2>/dev/null | head -n 1); "${T:-tailscale}" ';
 
 let cb = 0;
 function exec(cmd) {
@@ -225,7 +227,7 @@ async function refresh() {
 		exec(SVC + "status"),
 		exec(SSHD + "keys list"),
 		exec("cat " + q(CONF)),
-		exec("tailscale status --json 2>/dev/null"),
+		exec(TS + "status --json 2>/dev/null"),
 	]);
 	conf = cf.stdout;
 	let data = { keys: [] };
@@ -249,7 +251,7 @@ async function refresh() {
 	if (confGet("TAILNET_ONLY", "1") === "1" && status?.BackendState !== "Running")
 		warns.push("Tailscale isn't running: tailnet-only mode accepts no connections.");
 	if (port === "22") {
-		const prefs = await exec("tailscale debug prefs 2>/dev/null");
+		const prefs = await exec(TS + "debug prefs 2>/dev/null");
 		try { if (JSON.parse(prefs.stdout).RunSSH) warns.push("Tailscale SSH is on and takes port 22 on tailnet IPs. Turn it off (tailscale set --ssh=false) or change the port."); } catch {}
 	}
 	$("s-warn").innerHTML = warns.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("");
