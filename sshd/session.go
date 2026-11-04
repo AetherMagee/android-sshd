@@ -104,8 +104,13 @@ func (s *server) serveConn(sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs
 
 func (c *conn) notify(msg string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	chans := make([]ssh.Channel, 0, len(c.sessions))
 	for ch := range c.sessions {
+		chans = append(chans, ch)
+	}
+	c.mu.Unlock()
+	// Outside the lock: a client that stopped reading must not block other sessions.
+	for _, ch := range chans {
 		io.WriteString(ch.Stderr(), msg)
 	}
 }
@@ -132,6 +137,7 @@ func (c *conn) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 
 	var pt *ptyReq
 	var tty *os.File
+	var hangup func()
 	done := make(chan uint32, 1)
 	started := false
 	for {
@@ -142,9 +148,13 @@ func (c *conn) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{status}))
 			return
 		}
-		if req == nil { // channel closed by the client
+		if req == nil { // channel closed by the client, e.g. a ControlMaster client exited
 			if !started {
 				return
+			}
+			hangup()
+			if tty != nil {
+				tty.Close() // ends the output copy even if background jobs hold the pty
 			}
 			reqs = nil
 			continue
@@ -170,7 +180,7 @@ func (c *conn) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				io.WriteString(ch.Stderr(), err.Error()+"\r\n")
 				break
 			}
-			tty, err = c.start(ch, argv, pt, done)
+			tty, hangup, err = c.start(ch, argv, pt, done)
 			if err != nil {
 				log.Printf("%s: start %q: %v", c.sc.RemoteAddr(), argv, err)
 				io.WriteString(ch.Stderr(), "android-sshd: "+err.Error()+"\r\n")
@@ -217,8 +227,9 @@ func (c *conn) command(req *ssh.Request) ([]string, error) {
 }
 
 // start runs argv for the session and sends its exit status to done.
-// It returns the pty master, if one was requested.
-func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint32) (*os.File, error) {
+// It returns the pty master (if one was requested) and a func that ends the
+// session's processes; disconnecting calls it too.
+func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint32) (*os.File, func(), error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = c.acct.home
 	cmd.Env = c.env(pt)
@@ -233,7 +244,7 @@ func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint
 		attr.Setctty = true
 		f, err := pty.StartWithAttrs(cmd, &pty.Winsize{Cols: uint16(pt.Cols), Rows: uint16(pt.Rows)}, attr)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		tty = f
 		go io.Copy(f, ch)
@@ -251,10 +262,10 @@ func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint
 		// Not cmd.Stdin = ch: Wait would block until the client closes stdin.
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := cmd.Start(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		go func() { io.Copy(stdin, ch); stdin.Close() }()
 		go func() {
@@ -264,19 +275,27 @@ func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint
 		}()
 	}
 
-	// Kill the whole session (pgid = pid thanks to Setsid) on disconnect.
+	// Signal the whole session (pgid = pid thanks to Setsid), but never after
+	// it exited: the pid could belong to someone else by then.
 	pid := cmd.Process.Pid
-	go func() {
+	hangup := func() {
 		select {
 		case <-exited:
 			return
-		case <-c.ctx.Done():
+		default:
 		}
 		syscall.Kill(-pid, syscall.SIGHUP)
-		time.Sleep(2 * time.Second)
-		syscall.Kill(-pid, syscall.SIGKILL)
-	}()
-	return tty, nil
+		go func() {
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+				syscall.Kill(-pid, syscall.SIGKILL)
+			}
+		}()
+	}
+	stop := context.AfterFunc(c.ctx, hangup)
+	go func() { <-exited; stop() }()
+	return tty, hangup, nil
 }
 
 func exitStatus(err error) uint32 {
@@ -342,7 +361,7 @@ func (c *conn) forward(nc ssh.NewChannel) {
 		return
 	}
 	go ssh.DiscardRequests(reqs)
-	go func() { <-c.ctx.Done(); tc.Close(); ch.Close() }()
+	defer context.AfterFunc(c.ctx, func() { tc.Close(); ch.Close() })()
 	go func() { io.Copy(tc, ch); tc.(*net.TCPConn).CloseWrite() }()
 	io.Copy(ch, tc)
 	ch.CloseWrite()
