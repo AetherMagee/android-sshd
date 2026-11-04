@@ -54,10 +54,12 @@ Approval and max-age apply per connection: sessions multiplexed over a `ControlM
 ## Limitations
 
 - arm64 only.
-- sftp as non-root users works after the first reboot (it needs the module's binary mounted into `/system/bin`).
+- sftp as non-root users needs the module's binary mounted into `/system/bin`: after the first reboot, and on KernelSU only with a mounting metamodule.
 - Apps with notification access (smartwatch bridges, KDE Connect, ...) can press the notification's buttons, bypassing the unlock requirement.
 - Approval windows live in memory: restarting the daemon forgets them.
 - A numeric `user=` uid keeps the root manager's SELinux context; only `shell` switches context too.
+- `user="shell"` is not a hard boundary if your root manager grants `su` to the shell uid (e.g. after allowing it for adb).
+- `from-node=` matches the device's name (as in `tailscale status`), which tailnet admins can rename; it narrows a key, it doesn't replace it.
 - Port forwarding connects from the server process (root), whatever the key's `user=`. Use `no-port-forwarding` on keys that shouldn't reach the phone's network as root.
 - Approvals are read from the companion app's private storage. If the app is uninstalled, another app installed under the same package name could answer prompts (it still can't log in without a key).
 

@@ -24,8 +24,10 @@ jobs:
       - name: Check version
         id: v
         run: |
+          # Released means published *and* announced in update.json, so a run
+          # that failed to push update.json can be re-run.
           version="v$(cat VERSION)"
-          if gh release view "$version" >/dev/null 2>&1; then
+          if grep -q "\"version\": \"$version\"" update.json 2>/dev/null; then
             echo "$version already released"
             echo "skip=true" >>"$GITHUB_OUTPUT"
           fi
@@ -56,7 +58,7 @@ jobs:
         run: |
           . dist/build.env
           # Notes: feat/fix commit subjects since the previous release.
-          prev=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          prev=$(gh release list --json tagName --jq '.[].tagName' | grep -vxF "$VERSION" | head -n 1 || true)
           if [ -n "$prev" ]; then
             git log --reverse --format=%s "$prev..HEAD" | sed -nE 's/^(feat|fix)(\([^)]*\))?!?: (.)/- \u\3/p' >notes.md
           else
@@ -65,7 +67,11 @@ jobs:
           [ -s notes.md ] || echo "- Rebuild, no user-facing changes" >notes.md
           { printf '# Changelog\n\n## %s\n\n' "$VERSION"; cat notes.md; echo; tail -n +3 CHANGELOG.md; } >CHANGELOG.new
           mv CHANGELOG.new CHANGELOG.md
-          gh release create "$VERSION" "$ZIP" --title "$VERSION" --notes-file notes.md
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" "$ZIP" --clobber
+          else
+            gh release create "$VERSION" "$ZIP" --title "$VERSION" --notes-file notes.md
+          fi
           cat >update.json <<EOT
           {
             "version": "$VERSION",

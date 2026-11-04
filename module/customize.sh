@@ -27,12 +27,20 @@ done
 ui_print "- Installing the approval app"
 # Streamed from the module dir: no world-writable staging file to tamper with.
 APK="$MODPATH/app.apk"
-install_app() { pm install -r -S "$(stat -c %s "$APK")" <"$APK" 2>&1 | grep -q Success; }
-if ! install_app; then
+SIZE=$(stat -c %s "$APK")
+install_app() { pm install -r -S "$SIZE" <"$APK" 2>&1; }
+OUT=$(install_app)
+case "$OUT" in
+*INSTALL_FAILED_UPDATE_INCOMPATIBLE*)
 	# Signing key changed (e.g. a local build replacing a release): reinstall.
 	pm uninstall "$PKG" >/dev/null 2>&1
-	install_app || ui_print "! App install failed: logins that need approval will be denied"
-fi
+	OUT=$(install_app)
+	;;
+esac
+case "$OUT" in
+*Success*) ;;
+*) ui_print "! App install failed: $OUT" && ui_print "! Logins that need approval will be denied" ;;
+esac
 rm -f "$APK"
 pm grant "$PKG" android.permission.POST_NOTIFICATIONS 2>/dev/null
 
