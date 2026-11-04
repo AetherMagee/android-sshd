@@ -154,9 +154,5 @@ func editKeys(path, fp, line string) error {
 	for _, l := range out {
 		buf.WriteString(l + "\n")
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, buf.Bytes())
 }

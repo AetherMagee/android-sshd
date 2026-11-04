@@ -353,7 +353,7 @@ async function saveConf() {
 		const re = new RegExp("^" + k + "=.*$", "m");
 		body = re.test(body) ? body.replace(re, k + "=" + v) : body.replace(/\n?$/, "\n" + k + "=" + v + "\n");
 	}
-	const w = await exec("printf %s " + q(body) + " > " + q(CONF));
+	const w = await exec("printf %s " + q(body) + " > " + q(CONF + ".tmp") + " && mv -f " + q(CONF + ".tmp") + " " + q(CONF));
 	if (w.errno !== 0) return toast("Could not write config: " + lastLine(w));
 	await service("restart", "Saved, server restarted");
 }

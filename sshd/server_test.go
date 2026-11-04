@@ -350,27 +350,85 @@ func (f fakeConn) RemoteAddr() net.Addr { a, _ := net.ResolveTCPAddr("tcp", f.ad
 
 func TestPreAuthCap(t *testing.T) {
 	e := newEnv(t)
-	var idle []net.Conn
-	for i := 0; i < maxPreAuth; i++ {
-		c, err := net.Dial("tcp", e.addr)
+	dialFrom := func(ip string) net.Conn {
+		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(ip)}}
+		c, err := d.Dial("tcp", e.addr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer c.Close()
-		idle = append(idle, c)
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	rejected := func(c net.Conn) bool {
+		// Rejected connections are closed without a server banner.
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, err := c.Read(make([]byte, 64))
+		return err == io.EOF
+	}
+
+	// Per source IP.
+	var first net.Conn
+	for i := 0; i < maxPreAuthPerIP; i++ {
+		c := dialFrom("127.0.0.1")
+		if first == nil {
+			first = c
+		}
 	}
 	time.Sleep(200 * time.Millisecond)
-	// The next connection is closed without a server banner.
-	c, _ := net.Dial("tcp", e.addr)
-	defer c.Close()
-	c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if n, err := c.Read(make([]byte, 64)); err != io.EOF {
-		t.Fatalf("over the cap: read %d bytes, %v; want EOF", n, err)
+	if !rejected(dialFrom("127.0.0.1")) {
+		t.Fatal("connection over the per-IP cap was served")
 	}
-	// Freeing a slot lets new logins in again.
-	idle[0].Close()
+	// Overall, across IPs.
+	for i := maxPreAuthPerIP; i < maxPreAuth; i++ {
+		dialFrom(fmt.Sprintf("127.0.0.%d", 2+i/maxPreAuthPerIP))
+	}
+	time.Sleep(200 * time.Millisecond)
+	if !rejected(dialFrom("127.0.0.99")) {
+		t.Fatal("connection over the global cap was served")
+	}
+
+	// Freeing a slot lets logins in again.
+	first.Close()
 	time.Sleep(200 * time.Millisecond)
 	if out, err := e.run(e.key(`approve="never"`), "echo ok"); err != nil || out != "ok\n" {
 		t.Fatalf("after freeing a slot: %q, %v", out, err)
+	}
+}
+
+// Closing a session channel while the connection stays up (a ControlMaster
+// client exiting) must end the session's processes.
+func TestChannelCloseKillsSession(t *testing.T) {
+	e := newEnv(t)
+	c, err := e.dial(e.key(`approve="never"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for _, withPty := range []bool{false, true} {
+		pidFile := filepath.Join(t.TempDir(), "pid")
+		s, _ := c.NewSession()
+		if withPty {
+			s.RequestPty("xterm", 24, 80, ssh.TerminalModes{})
+		}
+		s.Start("echo $$ > " + pidFile + "; exec sleep 300")
+		var pid int
+		for i := 0; i < 50 && pid == 0; i++ {
+			time.Sleep(50 * time.Millisecond)
+			data, _ := os.ReadFile(pidFile)
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		}
+		if pid == 0 {
+			t.Fatal("session didn't start")
+		}
+		s.Close()
+		alive := true
+		for i := 0; i < 60 && alive; i++ {
+			time.Sleep(50 * time.Millisecond)
+			_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+			alive = err == nil
+		}
+		if alive {
+			t.Fatalf("pty=%v: process %d still running after the channel closed", withPty, pid)
+		}
 	}
 }

@@ -115,12 +115,6 @@ func appPrompt(ctx context.Context, title, text string, window bool) (time.Durat
 		"--ei", "timeout", strconv.Itoa(secs), "--ez", "window", strconv.FormatBool(window)); err != nil {
 		return 0, err
 	}
-	defer func() {
-		// Dismiss the notification if we stopped waiting first; a no-op otherwise.
-		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		broadcast(cctx, "CANCEL", id)
-	}()
 
 	path := filepath.Join(appAnswers, id)
 	t := time.NewTicker(250 * time.Millisecond)
@@ -128,6 +122,12 @@ func appPrompt(ctx context.Context, title, text string, window bool) (time.Durat
 	for {
 		select {
 		case <-ctx.Done():
+			// Gave up waiting: dismiss the notification, off the login's path.
+			go func() {
+				cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				broadcast(cctx, "CANCEL", id)
+			}()
 			return 0, ctx.Err()
 		case <-t.C:
 		}

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,9 +32,19 @@ type server struct {
 	approver    *approver
 	whois       func(ip string) (peer, error)
 	preAuth     chan struct{} // bounds connections that haven't authenticated yet
+
+	mu    sync.Mutex
+	perIP map[string]int // connections per source IP that haven't authenticated yet
+	quiet logLimiter     // for log lines that unauthenticated peers can trigger
 }
 
-const maxPreAuth = 16
+const (
+	maxPreAuth      = 16
+	maxPreAuthPerIP = 4
+	// Time to get through the handshake up to a verified key; the wait for an
+	// answer on the phone extends it.
+	handshakeTimeout = 15 * time.Second
+)
 
 func main() {
 	if len(os.Args) > 1 {
@@ -138,26 +149,48 @@ func (s *server) identify(c net.Conn) (peer, error) {
 	return peer{id: ip.String(), name: ip.String(), ip: ip.String()}, nil
 }
 
-func (s *server) handle(c net.Conn) {
-	defer c.Close()
+// admit reserves a pre-auth slot for ip; release frees it.
+func (s *server) admit(ip string) (release func(), ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.perIP == nil {
+		s.perIP = map[string]int{}
+	}
+	if s.perIP[ip] >= maxPreAuthPerIP {
+		return nil, false
+	}
 	select {
 	case s.preAuth <- struct{}{}:
 	default:
-		log.Printf("%s: rejected: %d connections already authenticating", c.RemoteAddr(), maxPreAuth)
-		return
+		return nil, false
 	}
-	authing := true
-	release := func() {
-		if authing {
-			authing = false
+	s.perIP[ip]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.perIP[ip]--; s.perIP[ip] == 0 {
+				delete(s.perIP, ip)
+			}
 			<-s.preAuth
-		}
+		})
+	}, true
+}
+
+func (s *server) handle(c net.Conn) {
+	defer c.Close()
+	ip, _, _ := net.SplitHostPort(c.RemoteAddr().String())
+	release, ok := s.admit(ip)
+	if !ok {
+		s.quiet.printf("%s: rejected: too many connections authenticating", ip)
+		return
 	}
 	defer release()
 
 	from, err := s.identify(c)
 	if err != nil {
-		log.Printf("%s: rejected: %v", c.RemoteAddr(), err)
+		s.quiet.printf("%s: rejected: %v", ip, err)
 		return
 	}
 
@@ -174,7 +207,7 @@ func (s *server) handle(c net.Conn) {
 			fp := ssh.FingerprintSHA256(key)
 			o, comment, err := findKey(s.keysPath, key)
 			if err != nil {
-				log.Printf("%s: %v", from, err)
+				s.quiet.printf("%s: %v", from, err)
 				return nil, err
 			}
 			if o == nil {
@@ -196,7 +229,10 @@ func (s *server) handle(c net.Conn) {
 			text := fmt.Sprintf("From %s\nKey %s %s", from, k.comment, fp)
 			stop := make(chan struct{})
 			var wg sync.WaitGroup
-			err := s.approver.approve(o.approve, fp+"|"+from.id, title, text, func() {
+			// The options are part of the id: editing a key (e.g. to user=root)
+			// doesn't inherit approvals given for its old privileges.
+			err := s.approver.approve(o.approve, fp+"|"+from.id+"|"+o.format(), title, text, func() {
+				c.SetDeadline(time.Now().Add(s.approver.timeout + handshakeTimeout))
 				preAuth.SendAuthBanner(fmt.Sprintf("android-sshd: approve this login on the phone (%s)...\n", s.approver.timeout))
 				wg.Go(func() { authKeepalive(preAuth, stop) })
 			})
@@ -211,11 +247,10 @@ func (s *server) handle(c net.Conn) {
 	}
 	cfg.AddHostKey(s.hostKey)
 
-	// Bounds the handshake, including the wait for an answer on the phone.
-	c.SetDeadline(time.Now().Add(s.approver.timeout + 30*time.Second))
+	c.SetDeadline(time.Now().Add(handshakeTimeout))
 	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
 	if err != nil {
-		log.Printf("%s: %v", from, err)
+		s.quiet.printf("%s: %v", from, err)
 		return
 	}
 	c.SetDeadline(time.Time{})
@@ -261,11 +296,70 @@ func loadHostKey(path string) (ssh.Signer, error) {
 			return nil, err
 		}
 		data = pem.EncodeToMemory(block)
-		if err := os.WriteFile(path, data, 0o600); err != nil {
+		if err := writeFileAtomic(path, data); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
 		return nil, err
 	}
 	return ssh.ParsePrivateKey(data)
+}
+
+// writeFileAtomic replaces path with data (mode 0600) so readers never see a
+// partial file, even if we crash midway.
+func writeFileAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name()) // no-op after a successful rename
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+// logLimiter drops log lines beyond a burst of 20 plus one per second, so
+// peers can't fill the disk by connecting in a loop.
+type logLimiter struct {
+	mu      sync.Mutex
+	tokens  float64
+	last    time.Time
+	dropped int
+}
+
+func (l *logLimiter) printf(format string, args ...any) {
+	l.mu.Lock()
+	now := time.Now()
+	if l.last.IsZero() {
+		l.tokens = 20
+	} else {
+		l.tokens = min(20, l.tokens+now.Sub(l.last).Seconds())
+	}
+	l.last = now
+	if l.tokens < 1 {
+		l.dropped++
+		l.mu.Unlock()
+		return
+	}
+	l.tokens--
+	dropped := l.dropped
+	l.dropped = 0
+	l.mu.Unlock()
+	if dropped > 0 {
+		log.Printf("(%d similar lines dropped)", dropped)
+	}
+	log.Printf(format, args...)
 }
