@@ -1,0 +1,16 @@
+# android-sshd authorized keys: one OpenSSH public key per line, optionally
+# prefixed with comma-separated options. The login name (root@, foo@) is
+# ignored; the key decides who you are.
+#
+#   user="root"          run as root (default), "shell" (like adb shell) or a numeric uid
+#   approve="window"     ask on the phone, then allow this key from that device
+#                        for 15 min or 1 h (default)
+#   approve="always"     ask on the phone for every connection
+#   approve="never"      never ask
+#   max-age="8h"         close connections after this long, even if active (default 8h)
+#   from-node="laptop"   only accept from this tailnet device
+#   no-port-forwarding   refuse ssh -L
+#
+# Examples:
+#   ssh-ed25519 AAAA... me@laptop
+#   user="shell",approve="always",max-age="30m" ssh-ed25519 AAAA... me@work

@@ -1,0 +1,7 @@
+id=android-sshd
+name=android-sshd
+version=dev
+versionCode=0
+author=AetherMagee
+description=SSH server for rooted Android with per-key privileges and login approval on the phone.
+updateJson=https://raw.githubusercontent.com/AetherMagee/android-sshd/main/update.json

@@ -1,0 +1,70 @@
+#!/system/bin/sh
+# sshd.service {start|stop|restart|status|log}
+
+MODDIR=/data/adb/modules/android-sshd
+DATA=/data/adb/sshd
+CONF=$DATA/sshd.conf
+LOG=$DATA/sshd.log
+PIDFILE=$DATA/sshd.pid
+# A freshly installed/updated module sits in modules_update until reboot; prefer it.
+BIN=/data/adb/modules_update/android-sshd/system/bin/android-sshd
+[ -x "$BIN" ] || BIN=$MODDIR/system/bin/android-sshd
+
+pid() {
+	p=$(cat "$PIDFILE" 2>/dev/null) || return 1
+	[ -n "$p" ] && [ -d "/proc/$p" ] && grep -q android-sshd "/proc/$p/cmdline" 2>/dev/null && echo "$p"
+}
+
+set_desc() {
+	sed -i "s|^description=.*|description=[$1] SSH server for rooted Android with per-key privileges and login approval on the phone.|" "$MODDIR/module.prop" 2>/dev/null
+}
+
+start() {
+	if p=$(pid); then echo "android-sshd already running (pid $p)"; return 0; fi
+	PORT=22 TAILNET_ONLY=1 PROMPT_TIMEOUT=60 EXTRA_ARGS=""
+	# shellcheck source=/dev/null
+	[ -f "$CONF" ] && . "$CONF"
+	tailnet=true
+	[ "$TAILNET_ONLY" = 1 ] || tailnet=false
+
+	[ -f "$LOG" ] && mv -f "$LOG" "$LOG.old"
+	# shellcheck disable=SC2086
+	nohup "$BIN" --dir="$DATA" --listen=":$PORT" --tailnet-only="$tailnet" \
+		--prompt-timeout="${PROMPT_TIMEOUT}s" $EXTRA_ARGS >"$LOG" 2>&1 &
+	echo $! >"$PIDFILE"
+	sleep 1
+	if p=$(pid); then
+		echo "android-sshd started (pid $p), port $PORT"
+		set_desc "running on port $PORT"
+	else
+		echo "android-sshd failed to start, see $LOG"
+		tail -n 5 "$LOG"
+		set_desc "failed to start"
+		return 1
+	fi
+}
+
+stop() {
+	p=$(pid) || { echo "android-sshd not running"; set_desc "stopped"; return 0; }
+	kill "$p"
+	i=0
+	while [ -d "/proc/$p" ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+	[ -d "/proc/$p" ] && kill -9 "$p"
+	rm -f "$PIDFILE"
+	echo "android-sshd stopped"
+	set_desc "stopped"
+}
+
+case "$1" in
+start) start ;;
+stop) stop ;;
+restart) stop && start ;;
+status)
+	if p=$(pid); then echo "running (pid $p)"; else echo "stopped"; exit 1; fi
+	;;
+log) tail -n "${2:-100}" -f "$LOG" ;;
+*)
+	echo "usage: sshd.service {start|stop|restart|status|log [lines]}"
+	exit 1
+	;;
+esac
