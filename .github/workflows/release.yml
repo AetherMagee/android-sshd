@@ -27,7 +27,7 @@ jobs:
           # Released means published *and* announced in update.json, so a run
           # that failed to push update.json can be re-run.
           version="v$(cat VERSION)"
-          if grep -q "\"version\": \"$version\"" update.json 2>/dev/null; then
+          if git show origin/main:update.json 2>/dev/null | grep -q "\"version\": \"$version\""; then
             echo "$version already released"
             echo "skip=true" >>"$GITHUB_OUTPUT"
           fi
@@ -56,7 +56,8 @@ jobs:
           SKIP_TESTS: 1 # tested above, without the signing key in the environment
         run: |
           [ -n "$APP_KEYSTORE" ] || { echo "APP_KEYSTORE secret missing"; exit 1; }
-          ./build.sh # ubuntu-latest ships the Android SDK in $ANDROID_HOME
+          # ubuntu-latest ships the Android SDK in $ANDROID_HOME and the NDK in $ANDROID_NDK_LATEST_HOME
+          ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" ./build.sh
 
       - name: Publish
         if: steps.v.outputs.skip != 'true'

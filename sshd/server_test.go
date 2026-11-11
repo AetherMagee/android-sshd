@@ -499,3 +499,30 @@ func TestExecBackgroundJobDoesNotHang(t *testing.T) {
 		t.Fatalf("got %q, %v after %s", out, err, time.Since(start))
 	}
 }
+
+// A background job that ignores SIGHUP and keeps the terminal open must not
+// keep a pty session alive after its shell exits.
+func TestPtyBackgroundJobDoesNotHang(t *testing.T) {
+	e := newEnv(t)
+	c, err := e.dial(e.key(`approve="never"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	s, _ := c.NewSession()
+	if err := s.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- s.Run("(trap '' HUP; exec sleep 30) & echo started") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("pty session hung on a background job holding the terminal")
+	}
+	t.Logf("ended after %s", time.Since(start))
+}

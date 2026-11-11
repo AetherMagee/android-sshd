@@ -17,6 +17,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
 // acct is the identity commands run as.
@@ -111,9 +112,10 @@ func (c *conn) notify(msg string) {
 		chans = append(chans, ch)
 	}
 	c.mu.Unlock()
-	// Outside the lock: a client that stopped reading must not block other sessions.
+	// Outside the lock and in parallel: a client that stopped reading mustn't
+	// hold up the others.
 	for _, ch := range chans {
-		io.WriteString(ch.Stderr(), msg)
+		go io.WriteString(ch.Stderr(), msg)
 	}
 }
 
@@ -171,7 +173,7 @@ func (c *conn) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		case "window-change":
 			var w winReq
 			if tty != nil && ssh.Unmarshal(req.Payload, &w) == nil {
-				pty.Setsize(tty, &pty.Winsize{Cols: uint16(w.Cols), Rows: uint16(w.Rows)})
+				setSize(tty, w.Cols, w.Rows)
 			}
 		case "shell", "exec", "subsystem":
 			if started {
@@ -243,18 +245,19 @@ func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint
 	var tty *os.File
 	exited := make(chan struct{})
 	if pt != nil {
-		attr.Setctty = true
-		f, err := pty.StartWithAttrs(cmd, &pty.Winsize{Cols: uint16(pt.Cols), Rows: uint16(pt.Rows)}, attr)
+		master, err := c.startPty(cmd, attr, pt)
 		if err != nil {
 			return nil, nil, err
 		}
-		tty = f
-		go io.Copy(f, ch)
+		tty = master
+		go io.Copy(master, ch)
+		output := make(chan struct{})
+		go func() { drain(ch, master, exited); close(output) }()
 		go func() {
-			io.Copy(ch, f) // ends with EIO once the shell and its children exit
 			status := exitStatus(cmd.Wait())
 			close(exited)
-			f.Close()
+			<-output // EIO once nothing holds the terminal, or quiet for a second (background jobs)
+			master.Close()
 			done <- status
 		}()
 	} else {
@@ -322,6 +325,48 @@ func (c *conn) start(ch ssh.Channel, argv []string, pt *ptyReq, done chan<- uint
 	stop := context.AfterFunc(c.ctx, hangup)
 	go func() { <-exited; stop() }()
 	return tty, hangup, nil
+}
+
+// startPty runs cmd on a new terminal owned by the session's user and returns
+// the master, non-blocking so that closing it interrupts a pending read.
+func (c *conn) startPty(cmd *exec.Cmd, attr *syscall.SysProcAttr, pt *ptyReq) (*os.File, error) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer tty.Close()
+	if err := os.Chown(tty.Name(), int(c.acct.uid), int(c.acct.uid)); err != nil && c.acct.uid != uint32(os.Getuid()) {
+		ptmx.Close()
+		return nil, err
+	}
+	// creack/pty leaves the master in blocking mode; swap in a pollable duplicate.
+	fd, err := unix.Dup(int(ptmx.Fd()))
+	ptmx.Close()
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.SetNonblock(fd, true); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	master := os.NewFile(uintptr(fd), "ptmx")
+	setSize(master, pt.Cols, pt.Rows)
+	attr.Setctty, attr.Ctty = true, 0
+	cmd.SysProcAttr = attr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	if err := cmd.Start(); err != nil {
+		master.Close()
+		return nil, err
+	}
+	return master, nil
+}
+
+func setSize(master *os.File, cols, rows uint32) {
+	if rc, err := master.SyscallConn(); err == nil {
+		rc.Control(func(fd uintptr) {
+			unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Col: uint16(cols), Row: uint16(rows)})
+		})
+	}
 }
 
 func exitStatus(err error) uint32 {
@@ -410,9 +455,11 @@ func (c *conn) forward(nc ssh.NewChannel) {
 	}
 	go ssh.DiscardRequests(reqs)
 	defer context.AfterFunc(c.ctx, func() { tc.Close(); ch.Close() })()
-	go func() { io.Copy(tc, ch); tc.(*net.TCPConn).CloseWrite() }()
-	io.Copy(ch, tc)
-	ch.CloseWrite()
+	// Each direction ends on its own (half-close); the forward ends when both have.
+	var both sync.WaitGroup
+	both.Go(func() { io.Copy(tc, ch); tc.(*net.TCPConn).CloseWrite() })
+	both.Go(func() { io.Copy(ch, tc); ch.CloseWrite() })
+	both.Wait()
 	ch.Close()
 	tc.Close()
 }

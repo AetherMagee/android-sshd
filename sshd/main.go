@@ -172,10 +172,11 @@ func (s *server) identify(c net.Conn) (peer, error) {
 	return peer{id: ip.String(), name: ip.String(), ip: ip.String()}, nil
 }
 
-// admit reserves a pre-auth slot for ip; release frees it. IPv6 sources count
-// per /64, since one host usually holds a whole /64.
+// admit reserves a pre-auth slot for ip; release frees it. Other IPv6 sources
+// count per /64, since one host usually holds a whole /64; tailnet addresses
+// count individually, since all peers share one prefix.
 func (s *server) admit(ip string) (release func(), ok bool) {
-	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() {
+	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() && !isTailnet(a) {
 		ip = netip.PrefixFrom(a, 64).Masked().String()
 	}
 	s.admitMu.Lock()

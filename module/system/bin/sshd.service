@@ -5,14 +5,16 @@ MODDIR=/data/adb/modules/android-sshd
 DATA=/data/adb/sshd
 CONF=$DATA/sshd.conf
 LOG=$DATA/sshd.log
-PIDFILE=$DATA/sshd.pid
+# Per-boot state on tmpfs: a stale pid or lock from before a reboot can't stick.
+RUN=/dev/android-sshd
+PIDFILE=$RUN/pid
 # A freshly installed/updated module sits in modules_update until reboot; prefer it.
 BIN=/data/adb/modules_update/android-sshd/system/bin/android-sshd
 [ -x "$BIN" ] || BIN=$MODDIR/system/bin/android-sshd
 
 pid() {
 	p=$(cat "$PIDFILE" 2>/dev/null) || return 1
-	[ -n "$p" ] && [ -d "/proc/$p" ] && grep -q android-sshd "/proc/$p/cmdline" 2>/dev/null && echo "$p"
+	case "$(readlink "/proc/$p/exe" 2>/dev/null)" in */android-sshd) echo "$p" ;; *) return 1 ;; esac
 }
 
 set_desc() {
@@ -21,8 +23,9 @@ set_desc() {
 
 start() {
 	# Boot, the WebUI and module toggling can race; one start at a time.
-	mkdir "$DATA/.starting" 2>/dev/null || { echo "android-sshd is already starting"; return 1; }
-	trap 'rmdir "$DATA/.starting" 2>/dev/null' EXIT
+	mkdir -p "$RUN"
+	mkdir "$RUN/starting" 2>/dev/null || { echo "android-sshd is already starting"; return 1; }
+	trap 'rmdir "$RUN/starting" 2>/dev/null' EXIT
 	if p=$(pid); then echo "android-sshd already running (pid $p)"; return 0; fi
 	PORT=22 TAILNET_ONLY=1 PROMPT_TIMEOUT=60 EXTRA_ARGS=""
 	# shellcheck source=/dev/null

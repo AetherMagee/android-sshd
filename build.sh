@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the module zip: sshd/ (Go) + app/ (companion APK) + module/ -> dist/android-sshd-v<VERSION>.zip
 #
-# Needs Go, a JDK and the Android SDK (build-tools + a platform; $ANDROID_HOME or ~/Android/Sdk).
+# Needs Go, a JDK and the Android SDK (build-tools, a platform, the NDK; $ANDROID_HOME or ~/Android/Sdk).
 # Env: SKIP_TESTS=1 to skip the Go tests
 set -euo pipefail
 
@@ -17,6 +17,7 @@ SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
 # Newest build-tools and platform.
 BT=$(printf '%s\n' "$SDK"/build-tools/* | sort -V | tail -n 1)
 JAR=$(printf '%s\n' "$SDK"/platforms/android-* | sort -V | tail -n 1)/android.jar
+NDK="${ANDROID_NDK_HOME:-$(printf '%s\n' "$SDK"/ndk/* | sort -V | tail -n 1)}"
 
 echo "==> android-sshd $VERSION ($VERSION_CODE)"
 rm -rf "$WORK" && mkdir -p "$WORK" "$DIST"
@@ -26,8 +27,11 @@ if [ -z "${SKIP_TESTS:-}" ]; then
 	echo "==> testing sshd"
 	go test ./...
 fi
-echo "==> building sshd linux/arm64"
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o "$WORK/android-sshd" .
+echo "==> building sshd android/arm64"
+# cgo against bionic: DNS lookups (ssh -L to a hostname) go through Android's resolver;
+# Go's own resolver needs /etc/resolv.conf, which Android doesn't have.
+CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang" \
+	go build -trimpath -ldflags="-s -w" -o "$WORK/android-sshd" .
 
 echo "==> building app ($(basename "$BT"), $(basename "$(dirname "$JAR")"))"
 APP="$WORK/app"
